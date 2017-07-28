@@ -3,22 +3,20 @@
 import array
 import struct
 import ctypes
-import fcntl, os
+import fcntl, os, time
 from Parcel import Parcel
+import binascii
 
 BINDER_PATH="/dev/binder"
+BINDER_CURRENT_PROTOCOL_VERSION=8
+DEFAULT_MAX_BINDER_THREADS = 15
+
 BINDER_TRASACTION_DATA_FORMAT_STRING = 'QQIIIIQQQQ'
 FLAT_BINDER_OBJECT_FORMAT_STRING = 'IIQQ'
 BINDER_WRITE_READ_FORMAT_STRING = 'QQQQQQ'
-B_TYPE_LARGE = 0x85
 
-BINDER_WRITE_READ=3224396289
-BINDER_SET_IDLE_TIMEOUT=1074291203
-BINDER_SET_MAX_THREADS=1074029061
-BINDER_SET_IDLE_PRIORITY=1074029062
-BINDER_SET_CONTEXT_MGR=1074029063
-BINDER_THREAD_EXIT=1074029064
-BINDER_VERSION=3221512713
+
+B_TYPE_LARGE = 0x85
 
 def B_PACK_CHARS_SHORT(c1, c2, c3):
     return (ord(c1) << 24) | \
@@ -31,6 +29,20 @@ def B_PACK_CHARS(c1, c2, c3, c4):
            (ord(c2) << 16) | \
            (ord(c3) << 8)  | \
            (ord(c4))
+class BinderIOCTL:
+    BINDER_WRITE_READ=3224396289
+    BINDER_SET_IDLE_TIMEOUT=1074291203
+    BINDER_SET_MAX_THREADS=1074029061
+    BINDER_SET_IDLE_PRIORITY=1074029062
+    BINDER_SET_CONTEXT_MGR=1074029063
+    BINDER_THREAD_EXIT=1074029064
+    BINDER_VERSION=3221512713
+
+class BinderTransactionFlags:
+    TF_ONE_WAY = 0x01
+    TF_ROOT_OBJECT = 0x04
+    TF_STATUS_CODE = 0x08
+    TF_ACCEPT_FDS = 0x10
 
 class BinderTransaction:
     FIRST_CALL_TRANSACTION  = 0x00000001,
@@ -97,23 +109,22 @@ class BinderUtil:
         self.__mOut = Parcel()
         self.__mIn  = Parcel()
         self.__mDriverFD = -1
+        self.__mReceived = False
+
+        self.__mDriverFD = open(BINDER_PATH, 'r+')
+        fcntl.fcntl(self.__mDriverFD, fcntl.F_SETFD, fcntl.FD_CLOEXEC);
+        rv = fcntl.fcntl(self.__mDriverFD, fcntl.F_SETFL, os.O_NDELAY)
+        buf = array.array('I', [0])
+        fcntl.ioctl(self.__mDriverFD, BinderIOCTL.BINDER_VERSION, buf)
+        version = struct.unpack('I', buf)[0]
+        if version is None or version != BINDER_CURRENT_PROTOCOL_VERSION:
+            print "Cannot Open Binder, or Version wrong"
+            return
+
+        fcntl.ioctl(self.__mDriverFD, BinderIOCTL.BINDER_SET_MAX_THREADS, struct.pack('I', DEFAULT_MAX_BINDER_THREADS))
 
     def openDriver(self):
-        try:
-            self.__mDriverFD = open(BINDER_PATH, 'r+')
-        except IOError as e:
-            if e.errno == errno.EACCES:
-                return "some default data"
-            # Not a permission error.
-            raise
-        else:
-            with self.__mDriverFD:
-                fcntl.fcntl(self.__mDriverFD, fcntl.F_SETFD, fcntl.FD_CLOEXEC);
-                rv = fcntl.fcntl(self.__mDriverFD, fcntl.F_SETFL, os.O_NDELAY)
-                buf = array.array('I', [0])
-                fcntl.ioctl(self.__mDriverFD, BINDER_VERSION, buf)
-                print "Binder Version: ",struct.unpack('I', buf)[0]
-
+        pass
 
     def writeTransactionData(self,cmd, binderFlags, handle, code, data):
         transactionValues=[]
@@ -131,8 +142,63 @@ class BinderUtil:
 
         self.__mOut.writeInt32(cmd)
         self.__mOut.write(BINDER_TRASACTION_DATA_FORMAT_STRING, transactionValues)
+        self.__mOut.submitWrite()
 
+    def talkWithDriver(self, doReceive = True):
+        self.__mDriverFD = open(BINDER_PATH, 'r+')
+        binderWriteRead = []
+        binderWriteRead.append(self.__mOut.ipcDataSize())
+        binderWriteRead.append(0)
+        binderWriteRead.append(self.__mOut.ipcData())
+
+        readCapacity = 256
+        self.__mIn.allocMemory(readCapacity)
+
+        binderWriteRead.append(readCapacity)
+        binderWriteRead.append(0)
+        binderWriteRead.append(self.__mIn.ipcData())
+        binderWriteReadStruct = struct.Struct('=' + BINDER_WRITE_READ_FORMAT_STRING)
+
+        buf = ctypes.create_string_buffer(binderWriteReadStruct.size)
+        binderWriteReadStruct.pack_into(buf, 0, *tuple(binderWriteRead))
+        fcntl.ioctl(self.__mDriverFD, BinderIOCTL.BINDER_WRITE_READ, ctypes.addressof(buf))
+
+        readConsumedStruct = struct.Struct('Q')
+        readConsumed = readConsumedStruct.unpack_from(buf, 32)
+        print "readConsumed: ", readConsumed[0]
+        if int(readConsumed[0]) > 0:
+            self.__mReceived = True
+
+    def transact(self, handle, code, data, reply, flags):
+        flags += BinderTransactionFlags.TF_ACCEPT_FDS
+        self.writeTransactionData(BinderCommandProtocol.BC_TRANSACTION, flags, handle, code, data)
+        if flags & BinderTransactionFlags.TF_ONE_WAY != 0:
+            self.talkWithDriver(False)
+
+    def registerToBinder(self):
+        outParcel = Parcel()
+        flatBinderObject = []
+
+        flatBinderObject.append(BinderType.BINDER_TYPE_BINDER)
+        flatBinderObject.append(0x7f | FlatBinderFlag.FLAT_BINDER_FLAG_ACCEPTS_FDS)
+        flatBinderObject.append(0)
+        flatBinderObject.append(0)
+        outParcel.write('IIQQ', flatBinderObject)
+        outParcel.submitWrite()
+        return outParcel
+
+
+    def enterServerLoop(self):
+        print "Server Ready to enter binder loop"
+
+        data = self.registerToBinder()
+        self.transact(0, 0, data, 0, BinderTransactionFlags.TF_ONE_WAY)
+#        while(True):
+        self.__mReceived = False
+        self.talkWithDriver()
+        if self.__mReceived:
+           print "Received CMD: ", self.__mIn.readInt32()
 
 if __name__ == '__main__':
     binder = BinderUtil()
-    binder.openDriver()
+#binder.openDriver()

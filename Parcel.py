@@ -3,6 +3,7 @@
 import binascii
 import ctypes
 import struct
+import types
 
 
 class Parcel:
@@ -15,7 +16,7 @@ class Parcel:
         self.__mStringInfo__ = []
         self.__mStringNo__ = 0
         self.__mStringReadNo__ = 0
-        self.__mObjectInfo= []
+        self.__mObjectInfo__= []
         self.__mObjectNo__ = 0
         self.__mObjectReadNo__ = 0
 
@@ -62,11 +63,17 @@ class Parcel:
             validFormatStr = formatStr
 
         self.__mDataFormatString__ += validFormatStr
-        self.__mRawData__.append(value)
+        if type(value) is types.ListType:
+            self.__mRawData__.extend(value)
+        else:
+            sel.__mRawData__.append(value)
 
-        self.__mObjectInfo__.append([strSize, self.__mDataWritePos__])
+        self.__mObjectInfo__.append([struct.Struct(validFormatStr).size, self.__mDataWritePos__])
         self.__mObjectNo__ += 1
         self.__mDataWritePos__ += struct.Struct(validFormatStr).size
+
+    def writFlatBinder(self, value):
+        self.write('IIQQ', value)
 
     def writeInt32(self, value):
         self.write4Bytes(value)
@@ -80,12 +87,17 @@ class Parcel:
     def writeUInt64(self, value):
         self.writeInt64(value)
 
-    def writeSubmit(self):
+    def submitWrite(self):
         parcelFormat = struct.Struct(self.__mDataFormatString__)
         self.__mDataSize__ = parcelFormat.size
         self.__mData__ = ctypes.create_string_buffer(self.__mDataSize__)
+        print "submitWrite formatStr: ", self.__mDataFormatString__
+        print "submitWrite DataValue: ", self.__mRawData__
         parcelFormat.pack_into(self.__mData__, 0, *tuple(self.__mRawData__))
 
+
+    def allocMemory(self, size):
+        self.__mData__ = ctypes.create_string_buffer(size)
 
     def readByte(self):
         if self.__mDataReadPos__ + 1 > self.__mDataSize__:
@@ -148,20 +160,34 @@ class Parcel:
             return
         return str(ret[0])
 
-    def readInt32(self, value):
-        return int(self.read4Bytes(value))
+    def readInt32(self):
+        ret = self.read4Bytes()
+        if ret is not None:
+            return int(ret)
 
-    def readUInt32(self, value):
-        return self.readInt32(value)
+    def readUInt32(self):
+        return self.readInt32()
 
-    def readInt64(self, value):
-        return int(self.read8Bytes(value))
+    def readInt64(self):
+        ret = self.read8Bytes()
+        if ret is not None:
+            return int(ret)
 
-    def readUInt64(self, value):
-        return self.readInt64(value)
+    def readUInt64(self):
+        return self.readInt64()
+
+    def setDataSize(self, size):
+        self.__mDataSize__ = size
+
+    def setDataReadPos(self, pos):
+        self.__mDataReadPos__ = pos
 
     def ipcDataSize(self):
         return self.__mDataSize__
 
     def ipcData(self):
-        return id(self.__mData__)
+        return ctypes.addressof(self.__mData__)
+
+    def dump(self):
+        print "FormatString: ", self.__mDataFormatString__
+        print "Value: ", self.__mRawData__[0]
