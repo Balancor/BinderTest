@@ -187,6 +187,9 @@ class BinderUtil:
         outParcel.submitWrite()
         return outParcel
 
+    def becomBinderManager(self):
+        self.__mDriverFD = open(BINDER_PATH, 'r+')
+        fcntl.ioctl(self.__mDriverFD, BinderIOCTL.BINDER_SET_CONTEXT_MGR, 0)
 
     def enterServerLoop(self):
         print "Server Ready to enter binder loop"
